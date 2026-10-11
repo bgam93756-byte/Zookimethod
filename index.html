@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>Zookimethod — Full Quality</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">Zookimethod</span>
+    <div class="topbar-actions">
+      <button id="sound-btn" class="pill" type="button" aria-pressed="false" aria-label="Sound off">🔇</button>
+      <button id="stats-btn" class="pill" type="button" aria-pressed="false">Stats</button>
+      <label class="pill pill-accent" for="file-input">＋ Play file</label>
+      <input id="file-input" type="file" accept="video/*" multiple hidden>
+    </div>
+  </header>
+
+  <main id="feed" class="feed" aria-label="Video feed"></main>
+
+  <template id="slide-template">
+    <section class="slide">
+      <video playsinline loop muted preload="none" disableremoteplayback></video>
+      <div class="badge" aria-live="polite"></div>
+      <div class="lag-warning" hidden></div>
+      <div class="caption">
+        <h2 class="title"></h2>
+        <p class="text"></p>
+      </div>
+      <div class="side-actions">
+        <button class="icon-btn fullscreen-btn" type="button" aria-label="Fullscreen">⛶</button>
+      </div>
+      <dl class="stats" hidden></dl>
+      <div class="tap-hint" hidden>Tap to play</div>
+    </section>
+  </template>
+
+  <template id="empty-template">
+    <section class="slide empty">
+      <div class="empty-card">
+        <h1>No compression. No downscaling.</h1>
+        <p>Every video here plays from the exact file you uploaded — your 4K, your 120&nbsp;fps, your bitrate. If a phone can't keep up, it lags for real.</p>
+        <ol>
+          <li>Drop video files into the <code>videos/</code> folder.</li>
+          <li>Run <code>python3 serve.py</code> and open the address it prints.</li>
+        </ol>
+        <p>Or test one right now — it never leaves your device:</p>
+        <label class="pill pill-accent big" for="file-input">＋ Play a video from this device</label>
+      </div>
+    </section>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>

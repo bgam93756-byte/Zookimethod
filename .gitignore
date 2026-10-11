@@ -1,0 +1,7 @@
+# Videos are usually far too big for git (GitHub rejects files over 100 MB).
+# Keep them in videos/ locally, or host them elsewhere — see README.
+videos/*
+!videos/.gitkeep
+
+__pycache__/
+.DS_Store
