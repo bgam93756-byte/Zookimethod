@@ -4,7 +4,10 @@
   --muted: rgba(255, 255, 255, 0.72);
   --glass: rgba(0, 0, 0, 0.45);
   --glass-strong: rgba(0, 0, 0, 0.7);
+  --sheet: #141416;
+  --field: #232327;
   --line: rgba(255, 255, 255, 0.18);
+  --line-strong: rgba(255, 255, 255, 0.35);
   --accent: #ff2d55;
   --good: #34c759;
   --warn: #ffcc00;
@@ -205,6 +208,109 @@ html, body {
 
 /* the stats panel already shows smoothness, so hide the warning under it */
 .slide:has(.stats:not([hidden])) .lag-warning { display: none; }
+
+/* ---------- upload sheet ---------- */
+
+.sheet {
+  width: min(520px, 100%);
+  max-width: 100%;
+  max-height: 88dvh;
+  margin: auto auto 0;
+  padding: 16px 16px calc(env(safe-area-inset-bottom, 0px) + 16px);
+  border: 1px solid var(--line);
+  border-radius: 18px 18px 0 0;
+  background: var(--sheet);
+  color: var(--fg);
+  overflow-y: auto;
+}
+.sheet::backdrop { background: rgba(0, 0, 0, 0.6); }
+@media (min-width: 700px) {
+  .sheet { margin: auto; border-radius: 18px; }
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.sheet-head h2 { margin: 0; font-size: 20px; }
+.sheet-close { width: 36px; height: 36px; font-size: 16px; }
+
+#upload-form { display: grid; gap: 8px; }
+
+.file-pick {
+  display: grid;
+  gap: 4px;
+  padding: 18px 16px;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: 12px;
+  text-align: center;
+  cursor: pointer;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.file-pick:focus-within, .file-pick:hover { border-color: var(--accent); }
+
+.field-label { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.field {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--field);
+  color: var(--fg);
+  font: 15px/1.4 var(--font);
+  resize: vertical;
+}
+.field:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+
+.switch {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  margin-top: 6px;
+  cursor: pointer;
+}
+.switch input { width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--accent); }
+.switch small { display: block; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+
+.form-error { margin: 0; color: var(--bad); font-size: 14px; }
+
+.sheet-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+
+.muted { color: var(--muted); }
+
+.jobs {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 16px 0 0;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+}
+.job { display: grid; gap: 6px; min-width: 0; }
+.job-row { display: flex; justify-content: space-between; gap: 12px; min-width: 0; }
+.job-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-stage { color: var(--muted); font-size: 14px; text-align: right; }
+.job[data-state="done"] .job-stage { color: var(--good); }
+.job[data-state="failed"] .job-stage { color: var(--bad); }
+.job-detail { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.job-actions { display: flex; gap: 8px; }
+.job-actions:not(:has(> :not([hidden]))) { display: none; }
+.job progress {
+  width: 100%;
+  height: 6px;
+  appearance: none;
+  border: 0;
+  border-radius: 3px;
+  background: var(--field);
+  accent-color: var(--accent);
+}
+.job progress::-webkit-progress-bar { background: var(--field); border-radius: 3px; }
+.job progress::-webkit-progress-value { background: var(--accent); border-radius: 3px; }
+.job progress::-moz-progress-bar { background: var(--accent); border-radius: 3px; }
 
 /* ---------- empty state ---------- */
 

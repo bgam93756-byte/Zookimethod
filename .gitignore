@@ -5,3 +5,6 @@ videos/*
 
 __pycache__/
 .DS_Store
+
+# Upload staging area and the private upload key
+.uploads/

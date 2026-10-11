@@ -92,6 +92,7 @@ function createSlide(entry) {
 
   el.querySelector('.title').textContent = entry.title || '';
   el.querySelector('.text').textContent = entry.caption || '';
+  if (entry.poster) video.poster = entry.poster;
   video.muted = state.muted;
   slide.stats.hidden = !state.showStats;
 
@@ -385,7 +386,6 @@ function render(slide) {
   const dpr = window.devicePixelRatio || 1;
   const src = sourceFps(slide);
 
-
   const rows = [
     ['Video', v.videoWidth ? `${v.videoWidth}×${v.videoHeight} (${resolutionLabel(v.videoWidth, v.videoHeight)})` : '…'],
     ['Video fps', src ? `${src.toFixed(src % 1 ? 2 : 0)}${slide.entry.fps ? '' : ' (measured)'}` : '…'],
@@ -394,6 +394,7 @@ function render(slide) {
     ['Dropped', q ? `${q.droppedVideoFrames.toLocaleString()} / ${q.totalVideoFrames.toLocaleString()}` : '—'],
     ['Bitrate', slide.bitrate ? formatBitrate(slide.bitrate) : '—'],
     ['Codec', slide.entry.codec || '—'],
+    ...(slide.entry.enhanced_from ? [['Source', `${slide.entry.enhanced_from}, enhanced`]] : []),
     ['Buffer', `${bufferedAhead(v).toFixed(1)} s${m.networkStall ? ' · stalled' : ''}`, m.networkStall ? 'bad' : ''],
     ['Screen', `${Math.round(screen.width * dpr)}×${Math.round(screen.height * dpr)} @ ${refresh.hz ? Math.round(refresh.hz) + ' Hz' : '…'}`],
   ];
@@ -440,7 +441,7 @@ soundBtn.addEventListener('click', () => setMuted(!state.muted));
 statsBtn.addEventListener('click', () => setShowStats(!state.showStats));
 
 document.addEventListener('keydown', (e) => {
-  if (e.target instanceof HTMLInputElement) return;
+  if (e.target.closest?.('input, textarea, select, dialog')) return;
   if (e.key === 'ArrowDown' || e.key === 'j') scrollBy(1);
   else if (e.key === 'ArrowUp' || e.key === 'k') scrollBy(-1);
   else if (e.key === ' ' && state.active) togglePlay(state.active);

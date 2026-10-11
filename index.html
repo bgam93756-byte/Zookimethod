@@ -13,7 +13,8 @@
     <div class="topbar-actions">
       <button id="sound-btn" class="pill" type="button" aria-pressed="false" aria-label="Sound off">🔇</button>
       <button id="stats-btn" class="pill" type="button" aria-pressed="false">Stats</button>
-      <label class="pill pill-accent" for="file-input">＋ Play file</label>
+      <label id="play-file-label" class="pill pill-accent" for="file-input">＋ Play file</label>
+      <button id="upload-btn" class="pill pill-accent" type="button" hidden>＋ Upload</button>
       <input id="file-input" type="file" accept="video/*" multiple hidden>
     </div>
   </header>
@@ -48,6 +49,54 @@
     </section>
   </template>
 
+  <dialog id="upload-dialog" class="sheet" aria-labelledby="upload-heading">
+    <div class="sheet-head">
+      <h2 id="upload-heading">Upload</h2>
+      <button class="icon-btn sheet-close" type="button" aria-label="Close">✕</button>
+    </div>
+    <form id="upload-form" novalidate>
+      <label class="file-pick" for="upload-file">
+        <span id="upload-file-name">Choose a video</span>
+        <span id="upload-file-info" class="muted"></span>
+      </label>
+      <input id="upload-file" type="file" accept="video/*" hidden>
+      <label class="field-label" for="upload-title">Title</label>
+      <input id="upload-title" class="field" type="text" maxlength="150" autocomplete="off">
+      <label class="field-label" for="upload-caption">Caption</label>
+      <textarea id="upload-caption" class="field" maxlength="2200" rows="2"></textarea>
+      <label class="switch" for="upload-enhance">
+        <input id="upload-enhance" type="checkbox" checked>
+        <span>
+          <strong>Enhance to 4K 120fps</strong>
+          <small>Upscales to 4K and adds in-between frames. Videos that are already 4K 120fps are posted exactly as they are.</small>
+        </span>
+      </label>
+      <p id="upload-error" class="form-error" hidden></p>
+      <div class="sheet-actions">
+        <button class="pill pill-accent big" type="submit">Upload</button>
+        <label id="upload-play-local" class="pill big" for="file-input">Just play it here</label>
+      </div>
+    </form>
+    <ul id="upload-jobs" class="jobs" hidden></ul>
+  </dialog>
+
+  <template id="upload-job-template">
+    <li class="job">
+      <div class="job-row">
+        <strong class="job-title"></strong>
+        <span class="job-stage"></span>
+      </div>
+      <progress max="1" value="0"></progress>
+      <p class="job-detail muted"></p>
+      <div class="job-actions">
+        <button class="pill job-cancel" type="button" hidden>Cancel</button>
+        <button class="pill pill-accent job-watch" type="button" hidden>Watch it</button>
+        <label class="pill pill-accent job-resume" hidden>Resume…<input type="file" accept="video/*" hidden></label>
+      </div>
+    </li>
+  </template>
+
   <script src="app.js"></script>
+  <script src="upload.js"></script>
 </body>
 </html>

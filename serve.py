@@ -3,10 +3,15 @@
 
     python3 serve.py              # serve on port 8000, open the printed address on your phone
     python3 serve.py --port 9000
+    python3 serve.py --no-uploads # watch-only: no upload button, no processing
     python3 serve.py --manifest   # write videos.json for a static host, then exit
 
 Video files are sent byte-for-byte as they are on disk. Nothing is
 re-encoded, resized or capped.
+
+Uploads use the private link printed at startup. Uploaded videos below 4K
+or 120 fps are upscaled and interpolated to 4K 120fps (tools/enhance.py),
+then appear in the feed.
 
 Python's built-in http.server ignores HTTP Range requests, which Safari
 (every iPhone browser) requires before it will play a video, and which every
@@ -14,10 +19,13 @@ browser uses to seek. This server answers them.
 """
 
 import argparse
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -28,9 +36,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 VIDEO_DIR = ROOT / "videos"
+UPLOAD_DIR = ROOT / ".uploads"
 MANIFEST = ROOT / "videos.json"
 VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
 CHUNK = 1024 * 1024
+MAX_JSON_BODY = 64 * 1024
+
+sys.path.insert(0, str(ROOT / "tools"))
+import uploads  # noqa: E402
+
+UPLOADS = None  # an uploads.UploadStore when uploads are enabled
+TOKEN = None
 
 
 @lru_cache(maxsize=256)
@@ -91,6 +107,14 @@ def build_manifest():
         title = re.sub(r"[_-]+", " ", path.stem).strip()
         entry = {"src": src, "title": title, "size": st.st_size}
         entry.update(probe(str(path), st.st_mtime, st.st_size))
+        # uploads leave a <name>.json next to the video with title, caption and poster
+        sidecar = path.with_suffix(".json")
+        if sidecar.is_file():
+            try:
+                meta = json.loads(sidecar.read_text())
+                entry.update({k: v for k, v in meta.items() if k in ("title", "caption", "poster", "enhanced_from") and v})
+            except (OSError, json.JSONDecodeError):
+                pass
         old = existing.get(src, {})
         for key in ("title", "caption"):
             if old.get(key):
@@ -113,6 +137,8 @@ class Handler(SimpleHTTPRequestHandler):
         ".js": "text/javascript",
     }
 
+    timeout = 120  # drop clients that stall mid-upload instead of holding a thread forever
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
@@ -126,7 +152,115 @@ class Handler(SimpleHTTPRequestHandler):
     def do_HEAD(self):
         self.handle_request(send_body=False)
 
+    def do_POST(self):
+        self.handle_api("POST")
+
+    def do_PUT(self):
+        self.handle_api("PUT")
+
+    def do_DELETE(self):
+        self.handle_api("DELETE")
+
+    # ---------- upload API (see tools/uploads.py) ----------
+
+    def handle_api(self, method):
+        self.body_read = False
+        path = self.path.split("?", 1)[0]
+        try:
+            if path == "/api/config" and method == "GET":
+                self.send_json(200, {
+                    "uploads": UPLOADS is not None,
+                    "processing": shutil.which("ffmpeg") is not None,
+                    "max_upload_bytes": UPLOADS.max_bytes if UPLOADS else 0,
+                    "chunk": {"min": uploads.MIN_CHUNK, "max": uploads.MAX_CHUNK, "max_final": uploads.MAX_FINAL_CHUNK},
+                })
+                return
+            if not path.startswith("/api/"):
+                raise uploads.UploadError(405, "method_not_allowed", "Only the /api/ endpoints accept this method.")
+            if UPLOADS is None:
+                raise uploads.UploadError(404, "uploads_disabled", "Uploads are turned off on this server.")
+            self.require_token()
+
+            if path == "/api/upload/init" and method == "POST":
+                self.send_json(200, UPLOADS.init(self.read_json()))
+                return
+            match = re.fullmatch(r"/api/upload/([0-9a-f]{24})", path)
+            if match and method == "PUT":
+                length = self.headers.get("Content-Length", "")
+                if not length.isdigit():
+                    raise uploads.UploadError(411, "length_required", "Each chunk needs a Content-Length header.")
+                self.body_read = True  # put_chunk consumes the body (or validates before touching it)
+                try:
+                    done, status = UPLOADS.put_chunk(match[1], self.headers.get("Content-Range"), int(length), self.rfile)
+                except uploads.UploadError as e:
+                    if e.code != "incomplete_chunk":
+                        self.body_read = False
+                    raise
+                self.send_json(201 if done else 206, status)
+                return
+            if match and method == "GET":
+                self.send_json(200, UPLOADS.status(match[1]))
+                return
+            if match and method == "DELETE":
+                self.send_json(200, UPLOADS.cancel(match[1]))
+                return
+            raise uploads.UploadError(404, "not_found", "Unknown API endpoint.")
+        except uploads.UploadError as e:
+            self.drain_body()
+            self.send_json(e.status, None, e.code, e.message)
+
+    def require_token(self):
+        sent = self.headers.get("Authorization", "")
+        if not (TOKEN and sent.startswith("Bearer ") and hmac.compare_digest(sent[7:].strip(), TOKEN)):
+            raise uploads.UploadError(401, "access_token_invalid", "Open the upload link printed by serve.py to get access.")
+
+    def read_json(self):
+        length = self.headers.get("Content-Length", "")
+        if not length.isdigit() or int(length) > MAX_JSON_BODY:
+            raise uploads.UploadError(400, "invalid_params", "Send a JSON body under 64 KB.")
+        self.body_read = True
+        try:
+            body = json.loads(self.rfile.read(int(length)) or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise uploads.UploadError(400, "invalid_params", "The request body isn't valid JSON.")
+        if not isinstance(body, dict):
+            raise uploads.UploadError(400, "invalid_params", "The request body must be a JSON object.")
+        return body
+
+    def drain_body(self):
+        """Read an unused request body so the client sees our error instead of a reset connection."""
+        length = self.headers.get("Content-Length", "")
+        if self.command in ("GET", "HEAD") or self.body_read or not length.isdigit():
+            return
+        remaining = int(length)
+        if remaining > uploads.MAX_FINAL_CHUNK + CHUNK:
+            self.close_connection = True
+            return
+        try:
+            while remaining > 0:
+                data = self.rfile.read(min(CHUNK, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+        except OSError:
+            self.close_connection = True
+
+    def send_json(self, status, data, code="ok", message=""):
+        # same envelope as TikTok's API: {"data": ..., "error": {"code", "message"}}
+        body = json.dumps({"data": data, "error": {"code": code, "message": message}}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ---------- static files and video streaming ----------
+
     def handle_request(self, send_body):
+        if self.path.startswith("/api/"):
+            self.handle_api("GET")
+            return
         path = Path(self.translate_path(self.path))
         # never expose .git, .gitignore, etc.
         if any(part.startswith(".") for part in path.relative_to(ROOT).parts):
@@ -211,11 +345,26 @@ def lan_address():
         return None
 
 
+def load_token():
+    """A random upload key, kept in .uploads/token so the upload link survives restarts."""
+    path = UPLOAD_DIR / "token"
+    if path.is_file() and path.read_text().strip():
+        return path.read_text().strip()
+    token = secrets.token_urlsafe(18)
+    UPLOAD_DIR.mkdir(exist_ok=True)
+    path.write_text(token + "\n")
+    path.chmod(0o600)
+    return token
+
+
 def main():
+    global UPLOADS, TOKEN
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", default="0.0.0.0", help="0.0.0.0 lets phones on your Wi-Fi connect")
     parser.add_argument("--manifest", action="store_true", help="write videos.json and exit")
+    parser.add_argument("--no-uploads", action="store_true", help="turn off uploading and processing")
+    parser.add_argument("--max-upload-gb", type=float, default=20, help="largest accepted upload (default 20)")
     args = parser.parse_args()
 
     VIDEO_DIR.mkdir(exist_ok=True)
@@ -228,6 +377,10 @@ def main():
             print("Tip: install ffmpeg so resolution/fps/codec get filled in automatically.")
         return
 
+    if not args.no_uploads:
+        TOKEN = load_token()
+        UPLOADS = uploads.UploadStore(UPLOAD_DIR, VIDEO_DIR, int(args.max_upload_gb * 1024**3))
+
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     count = len([p for p in VIDEO_DIR.glob("*") if p.suffix.lower() in VIDEO_EXTS])
     print(f"Serving {count} video(s) from {VIDEO_DIR} at full quality.")
@@ -235,12 +388,22 @@ def main():
     lan = lan_address()
     if lan and args.host == "0.0.0.0":
         print(f"  Phone (same Wi-Fi):  http://{lan}:{args.port}")
+    if UPLOADS:
+        host = lan if lan and args.host == "0.0.0.0" else "localhost"
+        print(f"Your private upload link (keep it to yourself):  http://{host}:{args.port}/#upload={TOKEN}")
+        if not shutil.which("ffmpeg"):
+            print("Warning: ffmpeg isn't installed, so uploads can't be processed. Install it first.")
     if MANIFEST.is_file():
         print(f"Note: using the {MANIFEST.name} on disk. Delete it to auto-list the videos/ folder.")
+    def stop(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print()
+        print("\nStopping…")
+        if UPLOADS:
+            UPLOADS.shutdown()  # stop ffmpeg; unfinished videos resume next time
         sys.exit(0)
 
 
