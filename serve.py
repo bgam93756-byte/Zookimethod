@@ -101,25 +101,41 @@ def build_manifest():
             pass
 
     files = sorted(
-        (p for p in VIDEO_DIR.glob("*") if p.suffix.lower() in VIDEO_EXTS and p.is_file()),
+        (p for p in VIDEO_DIR.glob("*") if p.suffix.lower() in VIDEO_EXTS and p.is_file() and not p.name.startswith(".")),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
+    sidecars = {}
+    for path in files:
+        sidecar = path.with_suffix(".json")
+        if sidecar.is_file():
+            try:
+                meta = json.loads(sidecar.read_text())
+                if isinstance(meta, dict):
+                    sidecars[path] = meta
+            except (OSError, json.JSONDecodeError):
+                pass
+    # extra encodes of the same video (name.av1.mp4) are listed under the main file's "sources"
+    alternates = {s.get("src") for meta in sidecars.values() for s in (meta.get("sources") or [])[1:] if isinstance(s, dict)}
     manifest = []
     for path in files:
+        if f"videos/{path.name}" in alternates:
+            continue
         st = path.stat()
         src = f"videos/{path.name}"
         title = re.sub(r"[_-]+", " ", path.stem).strip()
         entry = {"src": src, "title": title, "size": st.st_size}
         entry.update(probe(str(path), st.st_mtime, st.st_size))
-        # uploads leave a <name>.json next to the video with title, caption and poster
-        sidecar = path.with_suffix(".json")
-        if sidecar.is_file():
-            try:
-                meta = json.loads(sidecar.read_text())
-                entry.update({k: v for k, v in meta.items() if k in ("title", "caption", "poster", "enhanced_from") and v})
-            except (OSError, json.JSONDecodeError):
-                pass
+        # uploads leave a <name>.json next to the video with title, caption, poster and sources
+        meta = sidecars.get(path, {})
+        entry.update({k: v for k, v in meta.items() if k in ("title", "caption", "poster", "enhanced_from") and v})
+        sources = [s for s in (meta.get("sources") or []) if isinstance(s, dict) and isinstance(s.get("src"), str)
+                   and (VIDEO_DIR / Path(s["src"]).name).is_file()]
+        if len(sources) > 1:
+            for s in sources:
+                alt = VIDEO_DIR / Path(s["src"]).name
+                s["size"] = alt.stat().st_size
+            entry["sources"] = sources
         old = existing.get(src, {})
         for key in ("title", "caption"):
             if old.get(key):

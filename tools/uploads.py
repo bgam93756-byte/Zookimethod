@@ -432,14 +432,14 @@ class UploadStore:
             def on_progress(fraction, eta, speed):
                 self._set(upload, progress=round(fraction, 4), eta_seconds=eta, speed=speed)
 
-            out = work_dir / "out.mp4"
-            enhance.run(self._source(upload), out, plan, on_progress=on_progress, cancel=cancel)
+            outs = [work_dir / f"out{o['suffix']}.mp4" for o in plan["outputs"]]
+            enhance.run(self._source(upload), outs, plan, on_progress=on_progress, cancel=cancel)
 
             with self.lock:
                 if cancel.is_set():
                     raise enhance.Cancelled()
                 upload.update(stage=PUBLISHING, progress=1.0, eta_seconds=0)  # from here on cancel() says "too late"
-            video = self._publish(upload, plan, out)
+            video = self._publish(upload, plan, outs)
             with self.lock:
                 upload.update(status=COMPLETE, stage="Done", video=video, updated=time.time())
                 self._try_save(upload)
@@ -457,11 +457,15 @@ class UploadStore:
             if not keep:
                 self._cleanup(upload)
 
-    def _publish(self, upload, plan, out):
-        """Move the finished file into videos/ so it appears in the feed all at once."""
+    def _publish(self, upload, plan, outs):
+        """Move the finished files into videos/ so the video appears in the feed all at once.
+
+        The first output (HEVC) is the main file; others (AV1) sit next to it
+        as name.av1.mp4 and are listed in the sidecar's "sources".
+        """
         name = self._unique_name(upload["title"] or Path(upload["filename"]).stem)
-        final = self.video_dir / f"{name}.mp4"
-        part = self.video_dir / f".{name}.mp4.part"  # hidden from the feed and from static serving
+        finals = [self.video_dir / f"{name}{o['suffix']}.mp4" for o in plan["outputs"]]
+        parts = [f.with_name(f".{f.name}.part") for f in finals]  # hidden from the feed and from static serving
         poster = self.video_dir / f"{name}.jpg"
         sidecar = self.video_dir / f"{name}.json"
         meta = {
@@ -470,22 +474,29 @@ class UploadStore:
             "enhanced_from": plan["source_label"] if plan["enhanced"] else None,
             "uploaded": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        srcs = enhance.sources(plan, [f"videos/{f.name}" for f in finals])
+        if len(srcs) > 1:
+            meta["sources"] = srcs
+        created = [*parts, *finals[1:], poster, sidecar, sidecar.with_name(f".{sidecar.name}.part")]
         try:
             try:
-                enhance.make_poster(out, poster, at=min(upload.get("cover_ms", 1000) / 1000, max(plan["duration"] - 0.1, 0)))
+                enhance.make_poster(outs[0], poster, at=min(upload.get("cover_ms", 1000) / 1000, max(plan["duration"] - 0.1, 0)))
                 meta["poster"] = f"videos/{poster.name}"
             except enhance.EnhanceError:
                 pass
-            shutil.move(str(out), str(part))  # may copy when videos/ is on another drive
+            for out, part in zip(outs, parts):
+                shutil.move(str(out), str(part))  # may copy when videos/ is on another drive
+            for part, final in list(zip(parts, finals))[1:]:
+                os.replace(part, final)  # alternates first: nothing lists them until the main file exists
             tmp = sidecar.with_name(f".{sidecar.name}.part")
             tmp.write_text(json.dumps(meta, indent=2))
             os.replace(tmp, sidecar)
-            os.replace(part, final)  # atomic: the feed sees the whole file or nothing
+            os.replace(parts[0], finals[0])  # atomic: the feed sees the whole video or nothing
         except BaseException:
-            for path in (part, poster, sidecar, sidecar.with_name(f".{sidecar.name}.part")):
+            for path in created:
                 path.unlink(missing_ok=True)
             raise
-        return {"src": f"videos/{final.name}", **meta}
+        return {"src": f"videos/{finals[0].name}", **meta}
 
     def _cleanup(self, upload):
         """Delete the uploaded source and temp output; keep state.json for status lookups.

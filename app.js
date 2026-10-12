@@ -62,13 +62,13 @@ async function loadManifest() {
   }
 }
 
-// An entry can list several encodes of the same clip, e.g. HEVC first for
-// Safari and an H.264 fallback. Pick the first one this browser can decode.
+// An entry can list several encodes of the same clip: uploads get HEVC (what
+// Apple devices decode in hardware) and AV1 (Chrome, Firefox, Android). Pick
+// the first one this browser says it can decode.
 function pickSource(entry) {
-  if (!Array.isArray(entry.sources)) return entry.src;
+  if (!Array.isArray(entry.sources) || !entry.sources.length) return { src: entry.src };
   const probe = document.createElement('video');
-  const playable = entry.sources.find((s) => !s.type || probe.canPlayType(s.type) !== '');
-  return (playable || entry.sources[0]).src;
+  return entry.sources.find((s) => !s.type || probe.canPlayType(s.type) !== '') || entry.sources[0];
 }
 
 // ---------- slides ----------
@@ -76,14 +76,17 @@ function pickSource(entry) {
 function createSlide(entry) {
   const el = slideTpl.content.firstElementChild.cloneNode(true);
   const video = el.querySelector('video');
+  const source = pickSource(entry);
   const slide = {
     el,
     video,
     entry,
-    src: pickSource(entry),
+    src: source.src,
+    codec: source.codec || entry.codec,
+    size: source.size || entry.size,
     loaded: false,
     monitor: null,
-    bitrate: entry.bitrate || null,
+    bitrate: source.src === entry.src ? entry.bitrate || null : null,
     badge: el.querySelector('.badge'),
     stats: el.querySelector('.stats'),
     lagWarning: el.querySelector('.lag-warning'),
@@ -104,7 +107,7 @@ function createSlide(entry) {
   video.addEventListener('playing', () => (slide.hint.hidden = true));
   video.addEventListener('error', () => {
     if (!slide.loaded || !video.error) return;
-    const codec = entry.codec ? ` (${entry.codec})` : '';
+    const codec = slide.codec ? ` (${slide.codec})` : '';
     showHint(slide, `This browser can't play this video format${codec}. Try a different browser.`);
   });
   el.querySelector('.fullscreen-btn').addEventListener('click', () => toggleFullscreen(video));
@@ -231,7 +234,7 @@ async function findBitrate(slide) {
   if (slide.bitrate) return;
   const duration = slide.video.duration;
   if (!isFinite(duration) || duration <= 0) return;
-  let bytes = slide.entry.size;
+  let bytes = slide.size;
   if (!bytes && !slide.src.startsWith('blob:')) {
     try {
       const res = await fetch(slide.src, { method: 'HEAD' });
@@ -393,7 +396,7 @@ function render(slide) {
     ['Smoothness', m.smoothness != null ? `${Math.round(m.smoothness * 100)}%` : '—', grade(m.smoothness, 0.95, 0.85)],
     ['Dropped', q ? `${q.droppedVideoFrames.toLocaleString()} / ${q.totalVideoFrames.toLocaleString()}` : '—'],
     ['Bitrate', slide.bitrate ? formatBitrate(slide.bitrate) : '—'],
-    ['Codec', slide.entry.codec || '—'],
+    ['Codec', slide.codec || '—'],
     ...(slide.entry.enhanced_from ? [['Source', `${slide.entry.enhanced_from}, enhanced`]] : []),
     ['Buffer', `${bufferedAhead(v).toFixed(1)} s${m.networkStall ? ' · stalled' : ''}`, m.networkStall ? 'bad' : ''],
     ['Screen', `${Math.round(screen.width * dpr)}×${Math.round(screen.height * dpr)} @ ${refresh.hz ? Math.round(refresh.hz) + ' Hz' : '…'}`],

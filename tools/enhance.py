@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
-"""Upscale a video to 4K and interpolate it to 120 fps, then encode a web MP4.
+"""Upscale a video to 4K and interpolate it to 120 fps, then encode web MP4s.
 
-    python3 tools/enhance.py clip.mp4                 # -> videos/clip-4k120.mp4
-    python3 tools/enhance.py clip.mp4 -o out.mp4
-    python3 tools/enhance.py clip.mp4 --fast          # quicker, blends frames instead of tracking motion
-    python3 tools/enhance.py clip.mp4 --codec hevc    # smaller file; plays on iPhone and most Android/Chrome
+    python3 tools/enhance.py clip.mp4               # -> videos/clip-4k120.mp4 (HEVC) + .av1.mp4
+    python3 tools/enhance.py clip.mp4 --fast        # repeat frames instead of building new ones
+    python3 tools/enhance.py clip.mp4 --codec h264  # one H.264 file instead
 
-What it does, in order:
-  1. Interpolation to 120 fps happens at the source resolution, where it is
-     ~4x cheaper than at 4K. "best" tracks motion and builds the in-between
-     frames (minterpolate); "fast" blends neighbouring frames.
-  2. Upscaling to 4K (short side 2160 px, aspect ratio kept) with Lanczos,
-     plus light contrast-adaptive sharpening.
-  3. Encoding to H.264 (plays everywhere) or HEVC, capped so the file stays
-     manageable while remaining a true 4K 120fps stream.
+What it does, in order (settings measured against a true 4K 120fps clip;
+see the README's "How enhancement works"):
+  1. New in-between frames for 120 fps, built at the source resolution,
+     where it is ~4x cheaper than at 4K. "best" tracks motion
+     (minterpolate mci); "fast" repeats each frame, so motion looks like
+     the original but the file is still a real 120 fps stream.
+  2. Upscaling to 4K (short side 2160 px, aspect ratio kept) with Lanczos
+     and a light unsharp mask.
+  3. Encoding, in one pass, to HEVC (what iPhones and Macs decode in
+     hardware) and AV1 (Chrome, Firefox, Android). The player picks the
+     one the viewer's device can play. Bitrate is capped at 50 Mbps each.
 
 Anything already at 4K or 120 fps keeps that part as it is; nothing is ever
 scaled down. Upscaling can't recover detail the source never had, and
-in-between frames are estimates, so fast, complex motion can show warping.
+in-between frames are estimates, so fast, complex motion can warp.
 """
 
 import argparse
 import collections
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -37,24 +40,39 @@ TARGET_FPS = 120
 INPUT_FORMATS = "mov,matroska,webm"
 WEB_VIDEO_CODECS = {"h264", "hevc", "av1", "vp9"}
 WEB_AUDIO_CODECS = {"aac", "mp3"}
+DEFAULT_CODECS = ("hevc", "av1")
 
-# Tuned against a ground-truth 4K120 clip; see README "How enhancement works".
 INTERPOLATE = {
-    "best": "minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1",
-    "fast": "framerate=fps={fps}",
+    "best": "minterpolate=fps={fps}:mi_mode=mci",  # best score and 2x faster than bidir/aobmc variants
+    "fast": "fps={fps}",
 }
 SCALE = "scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int"
-SHARPEN = "cas=strength=0.4"
+SHARPEN = "unsharp=3:3:0.5:3:3:0.0"  # as good as CAS on the metrics, at a quarter of the cost
+
 ENCODERS = {
-    # rate caps keep a 4K120 upscale from ballooning: the source detail doesn't need more
-    "h264": ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-maxrate", "60M", "-bufsize", "120M",
-             "-profile:v", "high", "-pix_fmt", "yuv420p"],
-    "hevc": ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
-             "-x265-params", "vbv-maxrate=40000:vbv-bufsize=80000:log-level=error"],
-    "hevc10": ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-tag:v", "hvc1", "-pix_fmt", "yuv420p10le",
-               "-x265-params", "vbv-maxrate=40000:vbv-bufsize=80000:log-level=error"],
+    "hevc": {
+        "args": ["-c:v", "libx265", "-preset", "fast", "-crf", "22", "-tag:v", "hvc1",
+                 "-x265-params", "vbv-maxrate=50000:vbv-bufsize=100000:log-level=error"],
+        "type": 'video/mp4; codecs="hvc1.1.6.L156.B0"',   # Main, level 5.2: covers 4K 120fps
+        "type10": 'video/mp4; codecs="hvc1.2.4.L156.B0"',  # Main 10
+        "suffix": "",
+        "cap": 50e6,
+    },
+    "av1": {
+        "args": ["-c:v", "libsvtav1", "-preset", "10", "-crf", "40", "-maxrate", "50M", "-bufsize", "100M"],
+        "type": 'video/mp4; codecs="av01.0.14M.08"',  # Main, level 5.2
+        "type10": 'video/mp4; codecs="av01.0.14M.10"',
+        "suffix": ".av1",
+        "cap": 50e6,
+    },
+    "h264": {
+        "args": ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-maxrate", "60M", "-bufsize", "120M",
+                 "-profile:v", "high"],
+        "type": 'video/mp4; codecs="avc1.64003C"',  # High, level 6.0: many phones can't decode this
+        "suffix": ".h264",
+        "cap": 60e6,
+    },
 }
-CAP_BITRATE = {"h264": 60e6, "hevc": 40e6, "hevc10": 40e6}
 
 
 class EnhanceError(Exception):
@@ -119,7 +137,6 @@ def probe(path):
 
     pix_fmt = video.get("pix_fmt") or ""
     transfer = video.get("color_transfer") or ""
-    hdr = {"smpte2084": "pq", "arib-std-b67": "hlg"}.get(transfer)
     return {
         "width": width,
         "height": height,
@@ -129,7 +146,7 @@ def probe(path):
         "codec": video.get("codec_name"),
         "pix_fmt": pix_fmt,
         "ten_bit": "10" in pix_fmt or "12" in pix_fmt,
-        "hdr": hdr,
+        "hdr": {"smpte2084": "pq", "arib-std-b67": "hlg"}.get(transfer),
         "color": {k: video.get(k) for k in ("color_primaries", "color_transfer", "color_space") if video.get(k)},
         "audio_codec": audio.get("codec_name") if audio else None,
         "bitrate": int((data.get("format") or {}).get("bit_rate") or 0),
@@ -164,31 +181,28 @@ def target_fps(fps):
     return "120000/1001" if ntsc else str(TARGET_FPS)
 
 
-def make_plan(info, enhance=True, quality="best", codec="h264"):
+def make_plan(info, enhance=True, quality="best", codecs=DEFAULT_CODECS):
     if quality not in INTERPOLATE:
         raise EnhanceError(f"Unknown quality {quality!r}.")
-    if codec not in ("h264", "hevc"):
-        raise EnhanceError(f"Unknown codec {codec!r}.")
+    codecs = list(dict.fromkeys(codecs))
+    if not codecs or any(c not in ENCODERS for c in codecs):
+        raise EnhanceError(f"Unknown codec in {codecs!r}.")
 
     out_w, out_h = target_size(info["width"], info["height"]) if enhance else (info["width"], info["height"])
     new_fps = target_fps(info["fps"]) if enhance else None
     upscale = (out_w, out_h) != (info["width"], info["height"])
     out_fps = _ratio(new_fps) if new_fps else info["fps"]
     playable = info["codec"] in WEB_VIDEO_CODECS
-
-    # HDR and 10-bit sources stay 10-bit HEVC: 8-bit H.264 would wash out the colours
-    if info["ten_bit"] or info["hdr"]:
-        codec = "hevc10"
+    deep = info["ten_bit"] or bool(info["hdr"])
+    if deep and codecs == ["h264"]:
+        codecs = ["hevc"]  # 10-bit H.264 barely plays anywhere; 8-bit would wash out HDR
 
     filters = []
     if new_fps:
         filters.append(INTERPOLATE[quality].format(fps=new_fps))
     if upscale:
-        filters.append(SCALE.format(w=out_w, h=out_h))
-        filters.append(SHARPEN)
+        filters += [SCALE.format(w=out_w, h=out_h), SHARPEN]
 
-    source_label = label(info["width"], info["height"], info["fps"])
-    target_label = label(out_w, out_h, out_fps)
     if upscale and new_fps:
         summary = "Enhancing to 4K 120fps"
     elif upscale:
@@ -196,54 +210,91 @@ def make_plan(info, enhance=True, quality="best", codec="h264"):
     elif new_fps:
         summary = "Adding frames for 120fps"
     else:
-        summary = "Preparing for the web" if not playable else "Optimizing for streaming"
+        summary = "Optimizing for streaming" if playable else "Preparing for the web"
 
-    args = []
     if filters or not playable:
-        args += ["-vf", ",".join(filters)] if filters else []
-        args += ENCODERS[codec]
-        # carry the colour tags over, so HDR and wide-gamut video isn't shown with the wrong colours
+        # motion interpolation works in 8 bits; 10-bit/HDR sources go back to 10 bits after it
+        filters.append("format=yuv420p10le" if deep else "format=yuv420p")
+        color = []
         for flag, key in (("-color_primaries", "color_primaries"), ("-color_trc", "color_transfer"), ("-colorspace", "color_space")):
             if info["color"].get(key):
-                args += [flag, info["color"][key]]
-        bitrate = CAP_BITRATE[codec]
+                color += [flag, info["color"][key]]
+        outputs = []
+        for codec in codecs:
+            enc = ENCODERS[codec]
+            if deep and codec == "h264":
+                continue
+            outputs.append({
+                "codec": codec,
+                "args": enc["args"] + color,
+                "type": enc["type10"] if deep else enc["type"],
+                "suffix": enc["suffix"],
+                "cap": enc["cap"],
+            })
     else:
         # already 4K 120 (or enhancement off) and web-playable: copy the stream bit for bit
-        args += ["-c:v", "copy"] + (["-tag:v", "hvc1"] if info["codec"] == "hevc" else [])
-        bitrate = info["bitrate"] or CAP_BITRATE["h264"]
+        outputs = [{
+            "codec": info["codec"],
+            "args": ["-c:v", "copy"] + (["-tag:v", "hvc1"] if info["codec"] == "hevc" else []),
+            "type": None,
+            "suffix": "",
+            "cap": info["bitrate"] or 60e6,
+        }]
+        filters = []
 
     if info["audio_codec"] in WEB_AUDIO_CODECS:
-        args += ["-c:a", "copy"]
+        audio = ["-c:a", "copy"]
     elif info["audio_codec"]:
-        args += ["-c:a", "aac", "-b:a", "256k"]
+        audio = ["-c:a", "aac", "-b:a", "256k"]
+    else:
+        audio = []
 
     return {
-        "args": args,
-        "enhanced": bool(filters),
-        "copy": "-c:v" in args and args[args.index("-c:v") + 1] == "copy",
+        "filters": ",".join(filters),
+        "outputs": outputs,
+        "audio": audio,
+        "enhanced": bool(new_fps or upscale),
         "summary": summary,
-        "source_label": source_label,
-        "target_label": target_label,
+        "source_label": label(info["width"], info["height"], info["fps"]),
+        "target_label": label(out_w, out_h, out_fps),
         "width": out_w,
         "height": out_h,
         "fps": out_fps,
         "duration": info["duration"],
-        "estimated_bytes": int(info["duration"] * bitrate / 8),
+        "estimated_bytes": int(info["duration"] * sum(o["cap"] for o in outputs) / 8),
     }
 
 
 # ---------- running ----------
 
-def run(src, dst, plan, on_progress=None, cancel=None):
-    """Run ffmpeg, reporting (fraction, eta_seconds, speed) as it goes."""
-    dst = Path(dst)
+def build_command(src, dsts, plan):
+    """One ffmpeg run: decode and filter once, encode every output from it."""
+    if len(dsts) != len(plan["outputs"]):
+        raise ValueError("one destination per planned output")
     # -t and -fs keep a file that lies about its length from filling the disk
     limit_bytes = int(plan["estimated_bytes"] * 1.2) + 200 * 1024 * 1024
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-format_whitelist", INPUT_FORMATS, "-i", str(src),
-           "-map", "0:v:0", "-map", "0:a:0?", *plan["args"],
-           "-t", f"{plan['duration'] + 1:.3f}", "-fs", str(limit_bytes),
-           "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", "-loglevel", "error", str(dst)]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+    limits = ["-t", f"{plan['duration'] + 1:.3f}", "-fs", str(limit_bytes)]
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats", "-loglevel", "error",
+           "-format_whitelist", INPUT_FORMATS, "-i", str(src)]
+    if plan["filters"]:
+        n = len(dsts)
+        labels = "".join(f"[o{i}]" for i in range(n))
+        tail = f",split={n}{labels}" if n > 1 else "[o0]"
+        cmd += ["-filter_complex", f"[0:v:0]{plan['filters']}{tail}"]
+        video_maps = [["-map", f"[o{i}]"] for i in range(n)]
+    else:
+        video_maps = [["-map", "0:v:0"] for _ in dsts]
+    for dst, out, vmap in zip(dsts, plan["outputs"], video_maps):
+        cmd += [*vmap, "-map", "0:a:0?", *out["args"], *plan["audio"], *limits, "-movflags", "+faststart", str(dst)]
+    return cmd
+
+
+def run(src, dsts, plan, on_progress=None, cancel=None):
+    """Run ffmpeg, reporting (fraction, eta_seconds, speed) as it goes."""
+    dsts = [Path(d) for d in dsts]
+    cmd = build_command(src, dsts, plan)
+    env = {**os.environ, "SVT_LOG": "1"}  # SVT-AV1: errors only
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", env=env)
     errors = collections.deque(maxlen=50)  # only the last lines matter; a broken file can print millions
     reader = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
     reader.start()
@@ -251,9 +302,13 @@ def run(src, dst, plan, on_progress=None, cancel=None):
         def stop_on_cancel():
             while proc.poll() is None:
                 if cancel.wait(0.5):
-                    proc.kill()  # SIGTERM makes ffmpeg flush its encoder first, which takes seconds at 4K
+                    proc.kill()  # SIGTERM makes ffmpeg flush its encoders first, which takes seconds at 4K
                     return
         threading.Thread(target=stop_on_cancel, daemon=True).start()
+
+    def remove_outputs():
+        for dst in dsts:
+            dst.unlink(missing_ok=True)
 
     started = time.monotonic()
     total = max(plan["duration"], 0.001)
@@ -263,8 +318,8 @@ def run(src, dst, plan, on_progress=None, cancel=None):
             key, _, value = line.strip().partition("=")
             if key == "out_time_us" and value.isdigit() and on_progress:
                 fraction = min(int(value) / 1e6 / total, 0.999)
-                elapsed = time.monotonic() - started
                 now = time.monotonic()
+                elapsed = now - started
                 if fraction > 0 and now - last_report >= 0.5:
                     last_report = now
                     eta = elapsed * (1 - fraction) / fraction
@@ -275,16 +330,22 @@ def run(src, dst, plan, on_progress=None, cancel=None):
     except BaseException:
         proc.kill()
         proc.wait()
-        dst.unlink(missing_ok=True)
+        remove_outputs()
         raise
     reader.join(timeout=5)
     if proc.returncode != 0:
-        dst.unlink(missing_ok=True)
+        remove_outputs()
         # the details go to the server's terminal, not to the uploader
         print(f"ffmpeg failed on {src}:\n" + "".join(errors), file=sys.stderr)
         raise EnhanceError("ffmpeg couldn't process this video. It may be damaged or use an unusual format.", "transcode_failed")
     if on_progress:
         on_progress(1.0, 0, None)
+
+
+def sources(plan, srcs):
+    """The manifest's "sources" list: one entry per encode, in the order the player should try them."""
+    return [{"src": src, "type": out["type"], "codec": out["codec"]}
+            for src, out in zip(srcs, plan["outputs"]) if out["type"]]
 
 
 def make_poster(video, jpg, at=1.0):
@@ -303,20 +364,24 @@ def make_poster(video, jpg, at=1.0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input")
-    parser.add_argument("-o", "--output", help="default: videos/<name>-4k120.mp4")
-    parser.add_argument("--fast", action="store_true", help="blend frames instead of tracking motion (much quicker)")
-    parser.add_argument("--codec", choices=("h264", "hevc"), default="h264")
+    parser.add_argument("-o", "--output", help="main output file (default: videos/<name>-4k120.mp4)")
+    parser.add_argument("--fast", action="store_true", help="repeat frames instead of building new ones (much quicker)")
+    parser.add_argument("--codec", choices=("both", "hevc", "av1", "h264"), default="both",
+                        help="both = HEVC + AV1 (default), so every device gets one it can play")
     args = parser.parse_args()
 
+    codecs = DEFAULT_CODECS if args.codec == "both" else (args.codec,)
     try:
         info = probe(args.input)
-        plan = make_plan(info, quality="fast" if args.fast else "best", codec=args.codec)
+        plan = make_plan(info, quality="fast" if args.fast else "best", codecs=codecs)
     except EnhanceError as e:
         sys.exit(f"Error: {e}")
 
-    out = Path(args.output) if args.output else Path(__file__).resolve().parent.parent / "videos" / f"{Path(args.input).stem}-4k120.mp4"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    print(f"{plan['summary']}  ({info['duration']:.1f} s)")
+    main_out = Path(args.output) if args.output else Path(__file__).resolve().parent.parent / "videos" / f"{Path(args.input).stem}-4k120.mp4"
+    main_out.parent.mkdir(parents=True, exist_ok=True)
+    stem = main_out.name[: -len(main_out.suffix)] if main_out.suffix else main_out.name
+    dsts = [main_out.with_name(f"{stem}{o['suffix']}{main_out.suffix or '.mp4'}") for o in plan["outputs"]]
+    print(f"{plan['summary']}: {plan['source_label']} → {plan['target_label']}  ({info['duration']:.1f} s)")
 
     def show(fraction, eta, speed):
         bar = "#" * int(fraction * 30)
@@ -324,13 +389,21 @@ def main():
         print(f"\r  [{bar:<30}] {fraction * 100:5.1f}%  {eta_text:<12}", end="", flush=True)
 
     try:
-        run(args.input, out, plan, on_progress=show)
+        run(args.input, dsts, plan, on_progress=show)
     except KeyboardInterrupt:
         sys.exit("\nStopped.")
     except EnhanceError as e:
         sys.exit(f"\nError: {e}")
-    size = out.stat().st_size
-    print(f"\nSaved {out}  ({size / 1e6:.0f} MB, {size * 8 / max(info['duration'], 0.001) / 1e6:.0f} Mbps)")
+    print()
+    for dst, out in zip(dsts, plan["outputs"]):
+        size = dst.stat().st_size
+        print(f"Saved {dst}  ({out['codec']}, {size / 1e6:.0f} MB, {size * 8 / max(info['duration'], 0.001) / 1e6:.0f} Mbps)")
+    # a sidecar groups the encodes, so serve.py lists them as one video and the player picks per device
+    if len(dsts) > 1:
+        rel = [f"videos/{d.name}" if d.parent.name == "videos" else d.name for d in dsts]
+        meta = {"title": Path(args.input).stem, "sources": sources(plan, rel),
+                "enhanced_from": plan["source_label"] if plan["enhanced"] else None}
+        main_out.with_suffix(".json").write_text(json.dumps(meta, indent=2))
 
 
 if __name__ == "__main__":
