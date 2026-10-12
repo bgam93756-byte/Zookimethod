@@ -21,8 +21,8 @@ in-between frames are estimates, so fast, complex motion can show warping.
 """
 
 import argparse
+import collections
 import json
-import math
 import shutil
 import subprocess
 import sys
@@ -32,6 +32,9 @@ from pathlib import Path
 
 TARGET_SHORT_SIDE = 2160
 TARGET_FPS = 120
+# Only real video containers. Playlist formats (HLS, DASH, concat) would let an
+# uploaded text file make ffmpeg read other files on this computer.
+INPUT_FORMATS = "mov,matroska,webm"
 WEB_VIDEO_CODECS = {"h264", "hevc", "av1", "vp9"}
 WEB_AUDIO_CODECS = {"aac", "mp3"}
 
@@ -55,11 +58,22 @@ CAP_BITRATE = {"h264": 60e6, "hevc": 40e6, "hevc10": 40e6}
 
 
 class EnhanceError(Exception):
-    """A problem worth showing to the person who uploaded the video."""
+    """A problem worth showing to the person who uploaded the video.
+
+    code is a TikTok-style reason such as file_format_check_failed.
+    """
+
+    def __init__(self, message="", code="internal"):
+        super().__init__(message)
+        self.code = code
 
 
 class Cancelled(EnhanceError):
     pass
+
+
+def available():
+    return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
 
 
 # ---------- probing ----------
@@ -75,19 +89,20 @@ def _ratio(text):
 
 def probe(path):
     """Describe the video as it will be displayed (after any rotation)."""
-    if not shutil.which("ffprobe") or not shutil.which("ffmpeg"):
+    if not available():
         raise EnhanceError("ffmpeg isn't installed on the server, so videos can't be processed.")
-    cmd = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
+    cmd = ["ffprobe", "-v", "error", "-format_whitelist", INPUT_FORMATS,
+           "-show_streams", "-show_format", "-of", "json", str(path)]
     try:
         data = json.loads(subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=True).stdout)
     except (subprocess.SubprocessError, json.JSONDecodeError):
-        raise EnhanceError("That file isn't a video ffmpeg can read.")
+        raise EnhanceError("That file isn't a video this server can read. Upload an MP4, MOV, MKV or WebM file.", "file_format_check_failed")
 
     streams = data.get("streams") or []
     video = next((s for s in streams if s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     if not video or not video.get("width"):
-        raise EnhanceError("That file doesn't contain a video track.")
+        raise EnhanceError("That file doesn't contain a video track.", "file_format_check_failed")
 
     rotation = 0
     for side in video.get("side_data_list") or []:
@@ -100,7 +115,7 @@ def probe(path):
     fps = _ratio(video.get("avg_frame_rate")) or _ratio(video.get("r_frame_rate"))
     duration = float((data.get("format") or {}).get("duration") or video.get("duration") or 0)
     if fps <= 0 or duration <= 0:
-        raise EnhanceError("Couldn't work out the video's frame rate or length.")
+        raise EnhanceError("Couldn't work out the video's frame rate or length.", "file_format_check_failed")
 
     pix_fmt = video.get("pix_fmt") or ""
     transfer = video.get("color_transfer") or ""
@@ -222,11 +237,14 @@ def make_plan(info, enhance=True, quality="best", codec="h264"):
 def run(src, dst, plan, on_progress=None, cancel=None):
     """Run ffmpeg, reporting (fraction, eta_seconds, speed) as it goes."""
     dst = Path(dst)
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src),
+    # -t and -fs keep a file that lies about its length from filling the disk
+    limit_bytes = int(plan["estimated_bytes"] * 1.2) + 200 * 1024 * 1024
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-format_whitelist", INPUT_FORMATS, "-i", str(src),
            "-map", "0:v:0", "-map", "0:a:0?", *plan["args"],
+           "-t", f"{plan['duration'] + 1:.3f}", "-fs", str(limit_bytes),
            "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", "-loglevel", "error", str(dst)]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    errors = []
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+    errors = collections.deque(maxlen=50)  # only the last lines matter; a broken file can print millions
     reader = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
     reader.start()
     if cancel is not None:
@@ -262,8 +280,9 @@ def run(src, dst, plan, on_progress=None, cancel=None):
     reader.join(timeout=5)
     if proc.returncode != 0:
         dst.unlink(missing_ok=True)
-        detail = "".join(errors).strip().splitlines()[-3:]
-        raise EnhanceError("ffmpeg couldn't process this video" + (f": {' / '.join(detail)}" if detail else "."))
+        # the details go to the server's terminal, not to the uploader
+        print(f"ffmpeg failed on {src}:\n" + "".join(errors), file=sys.stderr)
+        raise EnhanceError("ffmpeg couldn't process this video. It may be damaged or use an unusual format.", "transcode_failed")
     if on_progress:
         on_progress(1.0, 0, None)
 
@@ -271,7 +290,8 @@ def run(src, dst, plan, on_progress=None, cancel=None):
 def make_poster(video, jpg, at=1.0):
     """Save a 1080-px-wide JPEG frame to show before the video loads."""
     for seek in (at, 0):
-        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-ss", str(seek), "-i", str(video),
+        cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-format_whitelist", INPUT_FORMATS,
+               "-ss", str(seek), "-i", str(video),
                "-frames:v", "1", "-vf", "scale='min(1080,iw)':-2", "-q:v", "3", str(jpg)]
         if subprocess.run(cmd, capture_output=True, timeout=120).returncode == 0 and Path(jpg).is_file():
             return

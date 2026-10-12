@@ -440,6 +440,15 @@ function scrollBy(step) {
 soundBtn.addEventListener('click', () => setMuted(!state.muted));
 statsBtn.addEventListener('click', () => setShowStats(!state.showStats));
 
+// Labels styled as buttons open file pickers; make them work from the keyboard too.
+document.addEventListener('keydown', (e) => {
+  const label = e.target.closest?.('label[role="button"]');
+  if (!label || (e.key !== 'Enter' && e.key !== ' ')) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  label.click();
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.target.closest?.('input, textarea, select, dialog')) return;
   if (e.key === 'ArrowDown' || e.key === 'j') scrollBy(1);
@@ -480,7 +489,8 @@ fileInput.addEventListener('change', () => {
 // ---------- start ----------
 
 (async function start() {
-  const entries = await loadManifest();
+  // an upload that finished while the manifest loaded may already be in the feed
+  const entries = (await loadManifest()).filter((e) => !state.slides.some((s) => s.entry.src === e.src));
   if (entries.length) addSlides(entries);
   else if (!state.slides.length) {
     state.emptyEl = emptyTpl.content.firstElementChild.cloneNode(true);

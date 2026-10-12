@@ -13,7 +13,7 @@
     <div class="topbar-actions">
       <button id="sound-btn" class="pill" type="button" aria-pressed="false" aria-label="Sound off">🔇</button>
       <button id="stats-btn" class="pill" type="button" aria-pressed="false">Stats</button>
-      <label id="play-file-label" class="pill pill-accent" for="file-input">＋ Play file</label>
+      <label id="play-file-label" class="pill pill-accent" for="file-input" tabindex="0" role="button">＋ Play file</label>
       <button id="upload-btn" class="pill pill-accent" type="button" hidden>＋ Upload</button>
       <input id="file-input" type="file" accept="video/*" multiple hidden>
     </div>
@@ -44,7 +44,7 @@
         <h1>No compression. No downscaling.</h1>
         <p>Videos here play from the exact file that was recorded: full 4K, full 120&nbsp;fps, full bitrate. If your phone can't keep up, it lags for real.</p>
         <p>Try one of your own videos. It plays straight from your device and is never uploaded.</p>
-        <label class="pill pill-accent big" for="file-input">＋ Play a video from this device</label>
+        <label class="pill pill-accent big" for="file-input" tabindex="0" role="button">＋ Play a video from this device</label>
       </div>
     </section>
   </template>
@@ -55,7 +55,7 @@
       <button class="icon-btn sheet-close" type="button" aria-label="Close">✕</button>
     </div>
     <form id="upload-form" novalidate>
-      <label class="file-pick" for="upload-file">
+      <label class="file-pick" for="upload-file" tabindex="0" role="button">
         <span id="upload-file-name">Choose a video</span>
         <span id="upload-file-info" class="muted"></span>
       </label>
@@ -74,7 +74,7 @@
       <p id="upload-error" class="form-error" hidden></p>
       <div class="sheet-actions">
         <button class="pill pill-accent big" type="submit">Upload</button>
-        <label id="upload-play-local" class="pill big" for="file-input">Just play it here</label>
+        <label id="upload-play-local" class="pill big" for="file-input" tabindex="0" role="button">Just play it here</label>
       </div>
     </form>
     <ul id="upload-jobs" class="jobs" hidden></ul>
@@ -89,9 +89,10 @@
       <progress max="1" value="0"></progress>
       <p class="job-detail muted"></p>
       <div class="job-actions">
-        <button class="pill job-cancel" type="button" hidden>Cancel</button>
+        <button class="pill pill-accent job-resume" type="button" hidden>Resume</button>
+        <label class="pill pill-accent job-pick" tabindex="0" role="button" hidden>Pick the video to resume<input type="file" accept="video/*" hidden></label>
         <button class="pill pill-accent job-watch" type="button" hidden>Watch it</button>
-        <label class="pill pill-accent job-resume" hidden>Resume…<input type="file" accept="video/*" hidden></label>
+        <button class="pill job-cancel" type="button" hidden>Cancel</button>
       </div>
     </li>
   </template>

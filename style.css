@@ -77,6 +77,11 @@ html, body {
   -webkit-backdrop-filter: blur(8px);
 }
 .pill[aria-pressed="true"] { background: var(--fg); color: #000; }
+.pill:focus-visible, .icon-btn:focus-visible, .file-pick:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 2px;
+}
+.pill:disabled { opacity: 0.5; cursor: default; }
 .pill-accent { background: var(--accent); border-color: transparent; }
 .pill.big { display: inline-block; font-size: 15px; padding: 12px 18px; }
 
@@ -311,6 +316,22 @@ html, body {
 .job progress::-webkit-progress-bar { background: var(--field); border-radius: 3px; }
 .job progress::-webkit-progress-value { background: var(--accent); border-radius: 3px; }
 .job progress::-moz-progress-bar { background: var(--accent); border-radius: 3px; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+  transform: translateX(-50%);
+  z-index: 20;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--fg);
+  color: #000;
+  font: 600 14px/1.4 var(--font);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+}
 
 /* ---------- empty state ---------- */
 
