@@ -24,8 +24,10 @@ in-between frames are estimates, so fast, complex motion can warp.
 
 import argparse
 import collections
+import functools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -92,6 +94,19 @@ class Cancelled(EnhanceError):
 
 def available():
     return bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+LIBRARIES = {"hevc": "libx265", "av1": "libsvtav1", "h264": "libx264"}
+
+
+@functools.lru_cache(maxsize=1)
+def installed_encoders():
+    """Which of our encoders this ffmpeg build has; many builds lack SVT-AV1 or x265."""
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    return frozenset(c for c, lib in LIBRARIES.items() if re.search(rf"\s{lib}\s", out))
 
 
 # ---------- probing ----------
@@ -196,6 +211,12 @@ def make_plan(info, enhance=True, quality="best", codecs=DEFAULT_CODECS):
     deep = info["ten_bit"] or bool(info["hdr"])
     if deep and codecs == ["h264"]:
         codecs = ["hevc"]  # 10-bit H.264 barely plays anywhere; 8-bit would wash out HDR
+    have = installed_encoders()
+    codecs = [c for c in codecs if c in have] or [c for c in ("hevc", "av1", "h264") if c in have][:1]
+    if deep and codecs != ["h264"]:
+        codecs = [c for c in codecs if c != "h264"]
+    elif deep:
+        deep = False  # only H.264 is installed: 8-bit is the best this ffmpeg can do
 
     filters = []
     if new_fps:
@@ -219,11 +240,11 @@ def make_plan(info, enhance=True, quality="best", codecs=DEFAULT_CODECS):
         for flag, key in (("-color_primaries", "color_primaries"), ("-color_trc", "color_transfer"), ("-colorspace", "color_space")):
             if info["color"].get(key):
                 color += [flag, info["color"][key]]
+        if not codecs:
+            raise EnhanceError("This server's ffmpeg has none of the libx265, libsvtav1 or libx264 encoders.", "transcode_failed")
         outputs = []
         for codec in codecs:
             enc = ENCODERS[codec]
-            if deep and codec == "h264":
-                continue
             outputs.append({
                 "codec": codec,
                 "args": enc["args"] + color,

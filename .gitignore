@@ -8,3 +8,6 @@ __pycache__/
 
 # Upload staging area and the private upload key
 .uploads/
+
+# Server data when running with deploy/docker-compose.yml
+deploy/.data/

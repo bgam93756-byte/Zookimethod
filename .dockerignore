@@ -1,0 +1,5 @@
+.git
+.uploads
+videos
+deploy/.data
+**/__pycache__

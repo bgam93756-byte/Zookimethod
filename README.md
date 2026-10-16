@@ -44,6 +44,56 @@ they are.
 Use `serve.py` instead of `python3 -m http.server`. The built-in server
 ignores HTTP Range requests, and iPhones won't play video without them.
 
+## Put it on the internet
+
+Two ways. Both keep uploads and 4K 120fps enhancement working, and both use
+HTTPS, so the upload key is encrypted on the way.
+
+### Free, from your own computer
+
+Install Cloudflare's free `cloudflared` (`brew install cloudflared` on Mac,
+`winget install --id Cloudflare.cloudflared` on Windows,
+[downloads](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+for Linux), then:
+
+```bash
+python3 serve.py --public
+```
+
+It prints a public `https://….trycloudflare.com` address that anyone can open,
+plus your private upload link on that address. You need no account and no
+router settings.
+
+- **It only works while your computer is on and the command is running.**
+- **The address changes every time you start it.** For a permanent address,
+  set up a free
+  [named Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/)
+  to your own domain and start with `--public-url https://your.domain`.
+- **Viewers stream from your home internet.** Each viewer watching 4K 120fps
+  needs about 50 Mbps of your *upload* speed, and many home connections have
+  20–50 Mbps in total. So expect buffering beyond one or two viewers.
+
+### 24/7 on a rented server
+
+1. Rent a Linux server with **4+ CPU cores and 8 GB of RAM**: the enhancement
+   needs about 4 GB while it runs. Examples: Hetzner CPX31 or CX32, or a
+   DigitalOcean 4 vCPU / 8 GB droplet. Prefer a plan with lots of included
+   traffic: 4K 120fps at about 45 Mbps is about 20 GB per viewer-hour.
+2. Point a domain (or a free subdomain, e.g. from DuckDNS) at the server's IP
+   address.
+3. On the server, install Docker, then:
+
+   ```bash
+   git clone https://github.com/bgam93756-byte/Zookimethod.git
+   cd Zookimethod/deploy
+   DOMAIN=videos.example.com docker compose up -d
+   docker compose logs zookimethod     # shows your private upload link
+   ```
+
+Caddy gets and renews the HTTPS certificate by itself. Videos and the upload
+key are kept in `deploy/.data/`, so they survive restarts and updates. To
+update, run `git pull && DOMAIN=videos.example.com docker compose up -d --build`.
+
 ## Uploading and enhancing to 4K 120fps
 
 1. Open your private upload link on your phone and tap **＋ Upload**.
@@ -180,10 +230,10 @@ cable, not a copy that went through a messaging app, which is already
 compressed. On iPhone, 4K 120fps needs Settings → Camera → Formats →
 High Efficiency.
 
-## Putting it online
+## A watch-only copy on a static host
 
-The site above runs on your own computer, which is what uploads and
-enhancement need. To publish a watch-only copy elsewhere, you need two things:
+Uploads and enhancement need `serve.py` running (see above). To publish a
+watch-only copy on a static host instead, you need two things:
 
 1. **The site** (`index.html`, `style.css`, `app.js`, `upload.js`,
    `videos.json`). Any static host works: GitHub Pages, Netlify, Cloudflare

@@ -1,0 +1,31 @@
+# Run on a rented server:  DOMAIN=videos.example.com docker compose up -d
+# Then find your private upload link with:  docker compose logs zookimethod
+services:
+  zookimethod:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["python3", "serve.py", "--port", "8000", "--public-url", "https://${DOMAIN:?set DOMAIN to your domain name}"]
+    volumes:
+      # a hidden folder, so serve.py --public run from this checkout never serves it
+      - ./.data/videos:/app/videos
+      - ./.data/uploads:/app/.uploads
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  caddy:
+    image: caddy:2.8.4
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      - zookimethod
+    restart: unless-stopped
+
+volumes:
+  caddy-data:

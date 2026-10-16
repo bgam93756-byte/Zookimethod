@@ -1,0 +1,10 @@
+# Caddy gets and renews the HTTPS certificate for your domain by itself.
+{$DOMAIN} {
+	reverse_proxy zookimethod:8000 {
+		# uploads and long 4K streams: don't cut them off
+		transport http {
+			read_timeout 10m
+			write_timeout 10m
+		}
+	}
+}

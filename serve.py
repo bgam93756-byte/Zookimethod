@@ -4,6 +4,7 @@
     python3 serve.py              # serve on port 8000, open the printed address on your phone
     python3 serve.py --port 9000
     python3 serve.py --no-uploads # watch-only: no upload button, no processing
+    python3 serve.py --public     # also give it a public https:// address (free Cloudflare tunnel)
     python3 serve.py --manifest   # write videos.json for a static host, then exit
 
 Video files are sent byte-for-byte as they are on disk. Nothing is
@@ -30,9 +31,12 @@ import signal
 import socket
 import subprocess
 import sys
+import queue
 import threading
+import time
 import traceback
 from functools import lru_cache
+from urllib.parse import urlsplit
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -45,7 +49,7 @@ VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
 CHUNK = 1024 * 1024
 MAX_JSON_BODY = 64 * 1024
 MAX_CONNECTIONS = 64
-EXTRA_HOSTS = set()  # names added with --allow-host
+EXTRA_HOSTS = set()  # names added with --allow-host, --public-url or --public ("*.example.com" allowed)
 
 sys.path.insert(0, str(ROOT / "tools"))
 import uploads  # noqa: E402
@@ -160,6 +164,8 @@ def host_allowed(header):
         host = host.rpartition(":")[0]
     host = host.rstrip(".")
     if host == "localhost" or host.endswith((".localhost", ".local")) or host in EXTRA_HOSTS:
+        return True
+    if any(name.startswith("*.") and host.endswith(name[1:]) for name in EXTRA_HOSTS):
         return True
     if host == socket.gethostname().lower():
         return True
@@ -358,6 +364,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     # ---------- static files and video streaming ----------
 
+    def list_directory(self, path):
+        # no folder listings: on a public address they'd show every file in the folder
+        self.send_error(HTTPStatus.NOT_FOUND)
+        return None
+
     def handle_request(self, send_body):
         if self.path.startswith("/api/"):
             self.handle_api("GET")
@@ -467,6 +478,50 @@ def load_token(renew=False):
     return token
 
 
+TUNNEL_URL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+
+
+def start_tunnel(port, timeout=60):
+    """Open a free Cloudflare quick tunnel to this server and return (process, public URL).
+
+    No account or router setup is needed. The address changes on every start;
+    a named tunnel or a rented server (see README) gives a permanent one.
+    """
+    exe = shutil.which("cloudflared")
+    if not exe:
+        sys.exit(
+            "--public needs Cloudflare's free cloudflared program:\n"
+            "  macOS:   brew install cloudflared\n"
+            "  Windows: winget install --id Cloudflare.cloudflared\n"
+            "  Linux:   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+        )
+    proc = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace")
+    lines = queue.Queue()
+
+    def pump():  # keep reading so cloudflared never blocks on a full pipe
+        for line in proc.stderr:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    seen = []
+    while time.monotonic() < deadline:
+        try:
+            line = lines.get(timeout=max(0.1, deadline - time.monotonic()))
+        except queue.Empty:
+            break
+        if line is None:
+            break
+        seen.append(line)
+        match = TUNNEL_URL.search(line)
+        if match:
+            return proc, match.group(0)
+    proc.kill()
+    sys.exit("Couldn't open the Cloudflare tunnel:\n" + "".join(seen[-8:]))
+
+
 def main():
     global UPLOADS, TOKEN
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -477,9 +532,20 @@ def main():
     parser.add_argument("--max-upload-gb", type=float, default=20, help="largest accepted upload (default 20)")
     parser.add_argument("--new-key", action="store_true", help="replace the upload key, so old upload links stop working")
     parser.add_argument("--allow-host", action="append", default=[], metavar="NAME",
-                        help="also answer requests for this host name (e.g. mypc.lan or a tunnel domain)")
+                        help="also answer requests for this host name (e.g. mypc.lan, or *.example.com)")
+    parser.add_argument("--public", action="store_true",
+                        help="also put the site on a free public https:// address (Cloudflare quick tunnel; needs cloudflared)")
+    parser.add_argument("--public-url", metavar="URL",
+                        help="the https:// address this server is reached at, e.g. behind Caddy on a rented server")
     args = parser.parse_args()
     EXTRA_HOSTS.update(h.strip().lower().rstrip(".") for h in args.allow_host)
+    public_url = None
+    if args.public_url:
+        parts = urlsplit(args.public_url if "://" in args.public_url else f"https://{args.public_url}")
+        if not parts.hostname:
+            sys.exit(f"--public-url {args.public_url!r} isn't a web address.")
+        public_url = f"{parts.scheme}://{parts.netloc}"
+        EXTRA_HOSTS.add(parts.hostname.lower())
 
     VIDEO_DIR.mkdir(exist_ok=True)
 
@@ -496,21 +562,39 @@ def main():
         UPLOADS = uploads.UploadStore(UPLOAD_DIR, VIDEO_DIR, int(args.max_upload_gb * 1024**3))
 
     server = Server((args.host, args.port), Handler)
-    count = len([p for p in VIDEO_DIR.glob("*") if p.suffix.lower() in VIDEO_EXTS])
+    tunnel = None
+    if args.public:
+        print("Opening a public address with Cloudflare…")
+        tunnel, public_url = start_tunnel(args.port)
+        EXTRA_HOSTS.add(urlsplit(public_url).hostname)
+
+    count = sum(1 for e in build_manifest() if "://" not in e["src"])  # HEVC + AV1 of one upload count once
     print(f"Serving {count} video(s) from {VIDEO_DIR} at full quality.")
-    print(f"  This computer:  http://localhost:{args.port}")
     lan = lan_address()
-    if lan and args.host == "0.0.0.0":
-        print(f"  Phone (same Wi-Fi):  http://{lan}:{args.port}")
+    if not args.public_url:  # behind a reverse proxy these local addresses only confuse
+        print(f"  This computer:  http://localhost:{args.port}")
+        if lan and args.host == "0.0.0.0":
+            print(f"  Phone (same Wi-Fi):  http://{lan}:{args.port}")
+    if public_url:
+        print(f"  Public (anyone can watch):  {public_url}")
+        if tunnel:
+            print("  This address changes each time you start with --public. Viewers stream from your")
+            print("  internet connection: each one watching 4K 120fps needs about 50 Mbps of your upload speed.")
     if UPLOADS:
-        host = lan if lan and args.host == "0.0.0.0" else "localhost"
-        print(f"Your private upload link:  http://{host}:{args.port}/#upload={TOKEN}")
-        print("  Anyone with this link can post videos. Only use it on Wi-Fi you trust (it isn't encrypted);")
-        print("  run with --new-key to replace it.")
+        if public_url:
+            print(f"Your private upload link:  {public_url}/#upload={TOKEN}")
+            print("  Anyone with this link can post videos, so keep it to yourself; run with --new-key to replace it.")
+        else:
+            host = lan if lan and args.host == "0.0.0.0" else "localhost"
+            print(f"Your private upload link:  http://{host}:{args.port}/#upload={TOKEN}")
+            print("  Anyone with this link can post videos. Only use it on Wi-Fi you trust (it isn't encrypted);")
+            print("  run with --new-key to replace it.")
         if not uploads.enhance.available():
             print("Warning: ffmpeg isn't installed, so uploads are turned off until you install it.")
     if MANIFEST.is_file():
         print(f"Note: using the {MANIFEST.name} on disk. Delete it to auto-list the videos/ folder.")
+    sys.stdout.flush()
+
     def stop(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, stop)
@@ -518,6 +602,8 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping…")
+        if tunnel:
+            tunnel.terminate()
         if UPLOADS:
             UPLOADS.shutdown()  # stop ffmpeg; unfinished videos resume next time
         sys.exit(0)
